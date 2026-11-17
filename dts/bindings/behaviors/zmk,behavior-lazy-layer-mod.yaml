@@ -1,0 +1,24 @@
+# Copyright (c) 2026 Engin Al
+# SPDX-License-Identifier: MIT
+
+description: |
+  Momentary layer that also holds a modifier, but only while it is held on its own.
+  The layer turns on at once. The modifier is pressed after delay-ms with no other key used,
+  and stays out of the hold once a non-modifier key or another layer is used.
+
+compatible: "zmk,behavior-lazy-layer-mod"
+
+include: one_param.yaml
+
+properties:
+  keycode:
+    type: int
+    required: true
+    description: Modifier to hold, e.g. <RGUI> (Cmd on macOS, Win on Windows).
+  delay-ms:
+    type: int
+    default: 300
+    description: Time after the layer turns on, with no other key used, before the modifier is pressed.
+  tap-on-release:
+    type: boolean
+    description: If released before delay-ms without using another key, tap the modifier.
