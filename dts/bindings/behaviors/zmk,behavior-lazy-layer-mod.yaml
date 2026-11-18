@@ -22,3 +22,8 @@ properties:
   tap-on-release:
     type: boolean
     description: If released before delay-ms without using another key, tap the modifier.
+  cancel-on-modifiers:
+    type: boolean
+    description: |
+      Other modifiers count as using a key: if Ctrl, Shift, Alt or GUI is held when the layer turns
+      on, or pressed before the modifier goes down, this hold never adds its modifier.

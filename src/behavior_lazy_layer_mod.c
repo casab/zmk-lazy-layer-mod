@@ -11,6 +11,10 @@
  * The point: Win/Cmd never wraps a key it wasn't meant for. On Windows, releasing a Win key that
  * nothing else touched opens the Start menu, and sending a symbol through a held Win needs Win
  * released first, which does exactly that.
+ *
+ * With `cancel-on-modifiers`, other modifiers count as using a key too: if Ctrl, Shift, Alt or GUI
+ * is already held when the layer turns on, or pressed before the modifier goes down, the hold
+ * never adds its modifier (Ctrl + this key is not Ctrl + Cmd).
  */
 
 #define DT_DRV_COMPAT zmk_behavior_lazy_layer_mod
@@ -20,10 +24,13 @@
 #include <zephyr/logging/log.h>
 #include <drivers/behavior.h>
 
+#include <dt-bindings/zmk/hid_usage_pages.h>
+
 #include <zmk/behavior.h>
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
+#include <zmk/hid.h>
 #include <zmk/keymap.h>
 #include <zmk/keys.h>
 
@@ -56,6 +63,7 @@ struct lazy_layer_mod_config {
     uint32_t keycode;
     uint32_t delay_ms;
     bool tap_on_release;
+    bool cancel_on_modifiers;
 };
 
 struct lazy_layer_mod_data {
@@ -75,11 +83,31 @@ static void raise_mod(const struct lazy_layer_mod_config *config, bool pressed) 
     raise_zmk_keycode_state_changed_from_encoded(config->keycode, pressed, k_uptime_get());
 }
 
+// Modifier bit of our own keycode (e.g. MOD_RGUI for RGUI), so it isn't mistaken for another one.
+static zmk_mod_flags_t own_mod_bit(const struct lazy_layer_mod_config *config) {
+    uint16_t id = ZMK_HID_USAGE_ID(config->keycode);
+    if (id >= HID_USAGE_KEY_KEYBOARD_LEFTCONTROL && id <= HID_USAGE_KEY_KEYBOARD_RIGHT_GUI) {
+        return BIT(id - HID_USAGE_KEY_KEYBOARD_LEFTCONTROL);
+    }
+    return 0;
+}
+
+// Another modifier is held right now (only matters with cancel-on-modifiers).
+static bool other_mods_held(const struct lazy_layer_mod_config *config) {
+    return config->cancel_on_modifiers &&
+           (zmk_hid_get_explicit_mods() & ~own_mod_bit(config)) != 0;
+}
+
 static void mod_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct lazy_layer_mod_data *data = CONTAINER_OF(dwork, struct lazy_layer_mod_data, mod_work);
 
     if (!data->active || data->combined || data->mod_down) {
+        return;
+    }
+
+    if (other_mods_held(data->config)) {
+        data->combined = true;
         return;
     }
 
@@ -102,14 +130,17 @@ static int lazy_layer_mod_pressed(struct zmk_behavior_binding *binding,
     struct lazy_layer_mod_data *data = dev->data;
 
     data->layer = binding->param1;
-    data->combined = false;
+    // With cancel-on-modifiers, a modifier already held (Ctrl + this key) means combined.
+    data->combined = other_mods_held(data->config);
     data->mod_down = false;
     data->active = true;
     held = data;
 
     // Activating the layer raises a layer event for our own layer; the listener ignores it.
     zmk_keymap_layer_activate(data->layer, false);
-    k_work_reschedule(&data->mod_work, K_MSEC(data->config->delay_ms));
+    if (!data->combined) {
+        k_work_reschedule(&data->mod_work, K_MSEC(data->config->delay_ms));
+    }
 
     return ZMK_BEHAVIOR_OPAQUE;
 }
@@ -157,11 +188,20 @@ static int lazy_layer_mod_listener(const zmk_event_t *eh) {
     }
 
     const struct zmk_keycode_state_changed *kc = as_zmk_keycode_state_changed(eh);
-    if (kc != NULL) {
-        // Modifiers (Shift for Cmd+Shift+click, our own modifier) don't count as using a key.
-        if (kc->state && !is_mod(kc->usage_page, kc->keycode)) {
+    if (kc != NULL && kc->state) {
+        if (!is_mod(kc->usage_page, kc->keycode)) {
             mark_combined(data);
+        } else if (data->config->cancel_on_modifiers &&
+                   kc->keycode != ZMK_HID_USAGE_ID(data->config->keycode)) {
+            // Another modifier (not our own) before the modifier went down. Without
+            // cancel-on-modifiers, modifiers don't count, so Cmd+Shift+click still works.
+            if (!data->mod_down) {
+                mark_combined(data);
+            }
         }
+        return ZMK_EV_EVENT_BUBBLE;
+    }
+    if (kc != NULL) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
@@ -191,6 +231,7 @@ static int lazy_layer_mod_init(const struct device *dev) {
         .keycode = DT_INST_PROP(n, keycode),                                                       \
         .delay_ms = DT_INST_PROP(n, delay_ms),                                                     \
         .tap_on_release = DT_INST_PROP(n, tap_on_release),                                         \
+        .cancel_on_modifiers = DT_INST_PROP(n, cancel_on_modifiers),                               \
     };                                                                                             \
     static struct lazy_layer_mod_data lazy_layer_mod_data_##n;                                     \
     BEHAVIOR_DT_INST_DEFINE(n, lazy_layer_mod_init, NULL, &lazy_layer_mod_data_##n,                \

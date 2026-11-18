@@ -11,7 +11,10 @@ modifier only applies when the key is held **on its own**.
 - Release without using another key: if the modifier is down it is released; if not, and
   `tap-on-release` is set, the modifier is tapped (on Windows, a Win tap opens the Start menu).
 
-Modifier keys (Shift, Ctrl, Alt, GUI) don't count as using another key, so Cmd+Shift+click works.
+By default, modifier keys (Shift, Ctrl, Alt, GUI) don't count as using another key, so
+Cmd+Shift+click works. With `cancel-on-modifiers` they do: a modifier already held when the layer
+turns on, or pressed before the modifier goes down, keeps the modifier out of the hold, so
+Ctrl + this key is just Ctrl on the layer, not Ctrl + Cmd.
 
 ## Why
 
@@ -75,6 +78,7 @@ behavior the modifier never wraps a key it wasn't meant for.
 | `keycode` | int | required | The modifier, e.g. `<RGUI>`, `<LCTRL>`. |
 | `delay-ms` | int | 300 | How long the key must be held alone, after the layer turns on, before the modifier goes down. |
 | `tap-on-release` | bool | off | Released alone before `delay-ms`: tap the modifier. |
+| `cancel-on-modifiers` | bool | off | Other modifiers held with it (before the modifier goes down) keep the modifier out. |
 
 ## Notes
 
