@@ -4,7 +4,7 @@
 description: |
   Momentary layer that also holds a modifier, but only while it is held on its own.
   The layer turns on at once. The modifier is pressed after delay-ms with no other key used,
-  and stays out of the hold once a non-modifier key or another layer is used.
+  and stays out of the hold once another key is pressed (plain modifiers aside) or another layer is used.
 
 compatible: "zmk,behavior-lazy-layer-mod"
 

@@ -12,6 +12,11 @@
  * nothing else touched opens the Start menu, and sending a symbol through a held Win needs Win
  * released first, which does exactly that.
  *
+ * Another key counts as used from the moment it is pressed, before it decides what it does: a
+ * layer-tap that only turns its layer on after its tapping term would otherwise let the modifier
+ * go down first. Without `cancel-on-modifiers`, a key that turns out to be a plain modifier (Shift
+ * for Cmd+Shift+click) is let through: the modifier waits while such a key is undecided.
+ *
  * With `cancel-on-modifiers`, other modifiers count as using a key too: if Ctrl, Shift, Alt or GUI
  * is already held when the layer turns on, or pressed before the modifier goes down, the hold
  * never adds its modifier (Ctrl + this key is not Ctrl + Cmd).
@@ -30,6 +35,7 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
+#include <zmk/events/position_state_changed.h>
 #include <zmk/hid.h>
 #include <zmk/keymap.h>
 #include <zmk/keys.h>
@@ -70,10 +76,16 @@ struct lazy_layer_mod_data {
     const struct lazy_layer_mod_config *config;
     struct k_work_delayable mod_work;
     uint8_t layer;
+    uint32_t position; // our own key, whose events are ignored
+    int64_t deadline;  // when the modifier goes down if still alone
     bool active;
     // Another key or layer was used during this hold: the modifier stays out of it.
     bool combined;
     bool mod_down;
+    // Without cancel-on-modifiers: another key is pressed but hasn't shown what it does yet. The
+    // modifier waits; a plain modifier lets it go on, anything else (or a release) is combined.
+    bool pending;
+    uint32_t pending_position;
 };
 
 // The instance being held. Only one is tracked; a second one pressed meanwhile takes over.
@@ -102,7 +114,7 @@ static void mod_work_handler(struct k_work *work) {
     struct k_work_delayable *dwork = k_work_delayable_from_work(work);
     struct lazy_layer_mod_data *data = CONTAINER_OF(dwork, struct lazy_layer_mod_data, mod_work);
 
-    if (!data->active || data->combined || data->mod_down) {
+    if (!data->active || data->combined || data->mod_down || data->pending) {
         return;
     }
 
@@ -121,7 +133,15 @@ static void mark_combined(struct lazy_layer_mod_data *data) {
         return;
     }
     data->combined = true;
+    data->pending = false;
     k_work_cancel_delayable(&data->mod_work);
+}
+
+// A pressed key turned out to be a plain modifier: carry on waiting for the rest of the delay.
+static void resolve_pending(struct lazy_layer_mod_data *data) {
+    data->pending = false;
+    int64_t left = data->deadline - k_uptime_get();
+    k_work_reschedule(&data->mod_work, K_MSEC(left > 0 ? left : 0));
 }
 
 static int lazy_layer_mod_pressed(struct zmk_behavior_binding *binding,
@@ -130,6 +150,9 @@ static int lazy_layer_mod_pressed(struct zmk_behavior_binding *binding,
     struct lazy_layer_mod_data *data = dev->data;
 
     data->layer = binding->param1;
+    data->position = event.position;
+    data->deadline = k_uptime_get() + data->config->delay_ms;
+    data->pending = false;
     // With cancel-on-modifiers, a modifier already held (Ctrl + this key) means combined.
     data->combined = other_mods_held(data->config);
     data->mod_down = false;
@@ -152,6 +175,7 @@ static int lazy_layer_mod_released(struct zmk_behavior_binding *binding,
 
     k_work_cancel_delayable(&data->mod_work);
     data->active = false;
+    data->pending = false;
     if (held == data) {
         held = NULL;
     }
@@ -178,8 +202,49 @@ static const struct behavior_driver_api lazy_layer_mod_driver_api = {
 #endif
 };
 
-// Key events and layer changes are always raised fresh (never replayed by hold-taps), so this
-// listener sees them wherever it sits in the listener order.
+static void on_position(struct lazy_layer_mod_data *data,
+                        const struct zmk_position_state_changed *pos) {
+    if (pos->position == data->position || data->mod_down) {
+        return;
+    }
+
+    if (pos->state) {
+        if (data->config->cancel_on_modifiers || data->pending) {
+            mark_combined(data);
+        } else {
+            // Wait and see: a layer-tap or mod-tap only shows what it does later.
+            data->pending = true;
+            data->pending_position = pos->position;
+            k_work_cancel_delayable(&data->mod_work);
+        }
+    } else if (data->pending && pos->position == data->pending_position) {
+        // Pressed and released without turning out to be a modifier: that key was used.
+        mark_combined(data);
+    }
+}
+
+static void on_keycode(struct lazy_layer_mod_data *data, const struct zmk_keycode_state_changed *kc) {
+    if (!kc->state) {
+        return;
+    }
+
+    if (!is_mod(kc->usage_page, kc->keycode)) {
+        mark_combined(data);
+    } else if (kc->keycode == ZMK_HID_USAGE_ID(data->config->keycode)) {
+        // Our own modifier, from us or from a key that sends it itself.
+    } else if (data->config->cancel_on_modifiers) {
+        // Another modifier before ours went down. Without cancel-on-modifiers, modifiers don't
+        // count, so Cmd+Shift+click still works.
+        if (!data->mod_down) {
+            mark_combined(data);
+        }
+    } else if (data->pending) {
+        resolve_pending(data);
+    }
+}
+
+// Hold-taps capture key positions while undecided and replay them after deciding; this listener
+// is linked after them, so it sees each press once, when it reaches the keymap.
 static int lazy_layer_mod_listener(const zmk_event_t *eh) {
     struct lazy_layer_mod_data *data = held;
 
@@ -187,21 +252,15 @@ static int lazy_layer_mod_listener(const zmk_event_t *eh) {
         return ZMK_EV_EVENT_BUBBLE;
     }
 
-    const struct zmk_keycode_state_changed *kc = as_zmk_keycode_state_changed(eh);
-    if (kc != NULL && kc->state) {
-        if (!is_mod(kc->usage_page, kc->keycode)) {
-            mark_combined(data);
-        } else if (data->config->cancel_on_modifiers &&
-                   kc->keycode != ZMK_HID_USAGE_ID(data->config->keycode)) {
-            // Another modifier (not our own) before the modifier went down. Without
-            // cancel-on-modifiers, modifiers don't count, so Cmd+Shift+click still works.
-            if (!data->mod_down) {
-                mark_combined(data);
-            }
-        }
+    const struct zmk_position_state_changed *pos = as_zmk_position_state_changed(eh);
+    if (pos != NULL) {
+        on_position(data, pos);
         return ZMK_EV_EVENT_BUBBLE;
     }
+
+    const struct zmk_keycode_state_changed *kc = as_zmk_keycode_state_changed(eh);
     if (kc != NULL) {
+        on_keycode(data, kc);
         return ZMK_EV_EVENT_BUBBLE;
     }
 
@@ -214,6 +273,7 @@ static int lazy_layer_mod_listener(const zmk_event_t *eh) {
 }
 
 ZMK_LISTENER(behavior_lazy_layer_mod, lazy_layer_mod_listener);
+ZMK_SUBSCRIPTION(behavior_lazy_layer_mod, zmk_position_state_changed);
 ZMK_SUBSCRIPTION(behavior_lazy_layer_mod, zmk_keycode_state_changed);
 ZMK_SUBSCRIPTION(behavior_lazy_layer_mod, zmk_layer_state_changed);
 

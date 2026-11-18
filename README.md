@@ -7,12 +7,15 @@ modifier only applies when the key is held **on its own**.
 - Keep holding without using another key for `delay-ms`: the modifier (for example Cmd/Win) goes
   down too, so you can Cmd+click with the mouse.
 - Use any other key or layer during the hold: the modifier stays out of it for the rest of the
-  hold. Keys that need it can still send it themselves, e.g. `&kp LG(C)`.
+  hold. Keys that need it can still send it themselves, e.g. `&kp LG(C)`. A key counts from the
+  moment it is pressed, so a layer-tap that only turns its layer on after its tapping term
+  doesn't let the modifier in meanwhile.
 - Release without using another key: if the modifier is down it is released; if not, and
   `tap-on-release` is set, the modifier is tapped (on Windows, a Win tap opens the Start menu).
 
 By default, modifier keys (Shift, Ctrl, Alt, GUI) don't count as using another key, so
-Cmd+Shift+click works. With `cancel-on-modifiers` they do: a modifier already held when the layer
+Cmd+Shift+click works: while another key is pressed but hasn't shown what it does yet (a mod-tap,
+say), the modifier waits; if it turns out to be a plain modifier, the delay carries on. With `cancel-on-modifiers` they do: a modifier already held when the layer
 turns on, or pressed before the modifier goes down, keeps the modifier out of the hold, so
 Ctrl + this key is just Ctrl on the layer, not Ctrl + Cmd.
 
